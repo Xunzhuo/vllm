@@ -17,6 +17,8 @@ pub struct PreparedRequest {
     pub response_model: String,
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
+    /// Whether the caller asked for cumulative usage on streamed chunks.
+    pub include_continuous_usage: bool,
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
     /// Original text prompt that should be echoed back northbound when
@@ -64,6 +66,10 @@ pub(crate) fn prepare_completion_request(
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let include_continuous_usage = include_usage
+        && (request.stream_options.as_ref())
+            .and_then(|options| options.continuous_usage_stats)
+            .unwrap_or(false);
     let echo = request.echo.then(|| request.prompt.as_text().cloned()).flatten();
 
     let structured_outputs =
@@ -117,6 +123,7 @@ pub(crate) fn prepare_completion_request(
         request_id,
         response_model,
         include_usage,
+        include_continuous_usage,
         text_request,
         echo,
         return_token_ids: request.return_token_ids.unwrap_or(false),
@@ -185,7 +192,10 @@ mod tests {
             "model": "Qwen/Qwen1.5-0.5B-Chat",
             "prompt": [11, 22, 33],
             "stream": true,
-            "stream_options": {"include_usage": true},
+            "stream_options": {
+                "include_usage": true,
+                "continuous_usage_stats": true
+            },
             "max_tokens": 7,
             "logprobs": 2,
             "top_p": 0.9,
@@ -207,6 +217,7 @@ mod tests {
         .expect("prepare");
 
         assert!(prepared.include_usage);
+        assert!(prepared.include_continuous_usage);
         assert_eq!(
             prepared.text_request.prompt,
             Prompt::TokenIds(vec![11, 22, 33])

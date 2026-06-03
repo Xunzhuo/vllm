@@ -84,6 +84,7 @@ pub async fn chat_completions(
             created,
             log_request,
             prepared.include_usage,
+            prepared.include_continuous_usage,
             prepared.requested_logprobs,
             prepared.echo,
             prepared.return_token_ids,
@@ -231,6 +232,7 @@ async fn chat_completion_chunk_stream(
     created: u64,
     log_request: bool,
     include_usage: bool,
+    include_continuous_usage: bool,
     requested_logprobs: bool,
     echo: Option<String>,
     return_token_ids: bool,
@@ -238,18 +240,21 @@ async fn chat_completion_chunk_stream(
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     let mut saw_tool_calls = false;
+    let mut usage_prompt_tokens = 0_u32;
+    let mut usage_output_tokens = 0_u32;
 
     // If the client requested logprobs or token_ids, we need to buffer chunks until
     // we receive the separate `LogprobsDelta` event, so that we can emit one
     // combined chunk with both the semantic delta and its per-update metadata.
-    let mut pending_chunk =
-        (requested_logprobs || return_token_ids).then(PendingChatChunk::default);
+    let mut pending_chunk = (requested_logprobs || return_token_ids || include_continuous_usage)
+        .then(PendingChatChunk::default);
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(ChatEvent::Start {
                 prompt_token_ids, ..
             }) => {
+                usage_prompt_tokens = prompt_token_ids.len() as u32;
                 let mut chunk = start_chunk(&request_id, &response_model, created);
                 if return_token_ids {
                     chunk.prompt_token_ids = Some(prompt_token_ids.to_vec());
@@ -289,14 +294,19 @@ async fn chat_completion_chunk_stream(
                     .as_ref()
                     .map(|lp| decoded_logprobs_to_openai_chat(lp, return_tokens_as_token_ids))
                     .transpose()?;
+                usage_output_tokens = usage_output_tokens.saturating_add(token_ids.len() as u32);
                 let openai_token_ids =
                     return_token_ids.then_some(token_ids).filter(|t| !t.is_empty());
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.logprobs = openai_logprobs;
                     pending_chunk.token_ids = openai_token_ids;
-                    if let Some(chunk) =
+                    if let Some(mut chunk) =
                         pending_chunk.take_chunk(&request_id, &response_model, created)
                     {
+                        if include_continuous_usage {
+                            chunk.usage =
+                                Some(Usage::from_counts(usage_prompt_tokens, usage_output_tokens));
+                        }
                         y.yield_ok(chunk).await;
                     }
                 } else if let Some(logprobs) = openai_logprobs {
@@ -373,9 +383,13 @@ async fn chat_completion_chunk_stream(
                 }
 
                 if let Some(pending_chunk) = pending_chunk.as_mut()
-                    && let Some(chunk) =
+                    && let Some(mut chunk) =
                         pending_chunk.take_chunk(&request_id, &response_model, created)
                 {
+                    if include_continuous_usage {
+                        chunk.usage =
+                            Some(Usage::from_counts(usage_prompt_tokens, usage_output_tokens));
+                    }
                     y.yield_ok(chunk).await;
                 }
 
@@ -894,6 +908,7 @@ mod tests {
             1,
             false,
             false,
+            false,
             true,
             None,
             false,
@@ -957,6 +972,7 @@ mod tests {
             1,
             false,
             false,
+            false,
             true,
             None,
             false,
@@ -1014,6 +1030,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            false,
             false,
             false,
             false,

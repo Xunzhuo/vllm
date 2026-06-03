@@ -2212,6 +2212,59 @@ async fn include_usage_adds_final_usage_chunk_before_done() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_stream_continuous_usage_adds_usage_to_delta_chunks() {
+    let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "stream_options": {
+                            "include_usage": true,
+                            "continuous_usage_stats": true
+                        },
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+
+    let first_delta = payloads
+        .iter()
+        .find(|payload| payload.contains("\"content\":\"h\""))
+        .expect("first delta chunk");
+    let first_delta: serde_json::Value =
+        serde_json::from_str(first_delta).expect("first delta json");
+    assert_eq!(first_delta["usage"]["prompt_tokens"], 22);
+    assert_eq!(first_delta["usage"]["completion_tokens"], 1);
+    assert_eq!(first_delta["usage"]["total_tokens"], 23);
+
+    let final_usage = payloads
+        .iter()
+        .filter_map(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .find(|payload| payload["choices"] == json!([]))
+        .expect("final usage chunk");
+    assert_eq!(final_usage["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn stream_without_include_usage_keeps_existing_shape() {
     let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
     let response = app
@@ -3299,6 +3352,59 @@ async fn completions_happy_path_returns_sse_stream() {
         serde_json::from_str(payloads[usage_index]).expect("usage chunk json");
     assert_eq!(usage_chunk["choices"], json!([]));
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_stream_continuous_usage_adds_usage_to_delta_chunks() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": true,
+                        "stream_options": {
+                            "include_usage": true,
+                            "continuous_usage_stats": true
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+
+    let first_delta = payloads
+        .iter()
+        .find(|payload| payload.contains("\"text\":\"h\""))
+        .expect("first delta chunk");
+    let first_delta: serde_json::Value =
+        serde_json::from_str(first_delta).expect("first delta json");
+    assert_eq!(first_delta["usage"]["prompt_tokens"], 5);
+    assert_eq!(first_delta["usage"]["completion_tokens"], 1);
+    assert_eq!(first_delta["usage"]["total_tokens"], 6);
+
+    let final_usage = payloads
+        .iter()
+        .filter_map(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .find(|payload| payload["choices"] == json!([]))
+        .expect("final usage chunk");
+    assert_eq!(final_usage["usage"]["completion_tokens"], 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
