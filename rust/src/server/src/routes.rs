@@ -15,8 +15,10 @@ use std::sync::Arc;
 use axum::Router;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
+use crate::config::CorsConfig;
 use crate::middleware;
 use crate::state::AppState;
 
@@ -94,10 +96,12 @@ fn build_router_with_options(
     }
 
     let enable_request_id_headers = state.enable_request_id_headers;
+    let cors_layer = cors_layer(&state.cors);
     let mut router = router
         .with_state(state.clone())
         .layer(from_fn_with_state(state, middleware::track_server_load))
         .layer(from_fn(middleware::track_http_metrics))
+        .layer(cors_layer)
         .layer(TraceLayer::new_for_http());
 
     if enable_request_id_headers {
@@ -105,6 +109,52 @@ fn build_router_with_options(
     }
 
     router
+}
+
+fn cors_layer(config: &CorsConfig) -> CorsLayer {
+    let mut layer = CorsLayer::new().allow_credentials(config.allow_credentials);
+
+    layer = if config.allows_any_origin() {
+        if config.allow_credentials {
+            layer.allow_origin(AllowOrigin::mirror_request())
+        } else {
+            layer.allow_origin(Any)
+        }
+    } else {
+        layer.allow_origin(
+            config
+                .allowed_origin_values()
+                .expect("CORS origins must be validated before building router"),
+        )
+    };
+
+    layer = if config.allows_any_method() {
+        if config.allow_credentials {
+            layer.allow_methods(AllowMethods::mirror_request())
+        } else {
+            layer.allow_methods(Any)
+        }
+    } else {
+        layer.allow_methods(
+            config
+                .allowed_method_values()
+                .expect("CORS methods must be validated before building router"),
+        )
+    };
+
+    if config.allows_any_header() {
+        if config.allow_credentials {
+            layer.allow_headers(AllowHeaders::mirror_request())
+        } else {
+            layer.allow_headers(Any)
+        }
+    } else {
+        layer.allow_headers(
+            config
+                .allowed_header_values()
+                .expect("CORS headers must be validated before building router"),
+        )
+    }
 }
 
 #[cfg(test)]

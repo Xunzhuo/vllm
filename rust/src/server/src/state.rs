@@ -8,6 +8,7 @@ use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 
+use crate::config::CorsConfig;
 use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraError};
 
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
@@ -25,6 +26,8 @@ pub struct AppState {
     pub enable_log_requests: bool,
     /// Whether to set X-Request-Id on every HTTP response.
     pub enable_request_id_headers: bool,
+    /// HTTP CORS behavior.
+    pub(crate) cors: CorsConfig,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
     /// Number of in-flight inference requests currently owned by this frontend.
@@ -52,6 +55,7 @@ impl AppState {
             chat,
             enable_log_requests: false,
             enable_request_id_headers: false,
+            cors: CorsConfig::default(),
             server_info: None,
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
@@ -67,6 +71,12 @@ impl AppState {
     /// Enable X-Request-Id response headers.
     pub fn with_request_id_headers(mut self, enabled: bool) -> Self {
         self.enable_request_id_headers = enabled;
+        self
+    }
+
+    /// Set HTTP CORS behavior.
+    pub fn with_cors(mut self, cors: CorsConfig) -> Self {
+        self.cors = cors;
         self
     }
 
