@@ -2409,6 +2409,42 @@ async fn non_stream_completions_echo_prepends_prompt_text() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn non_stream_completions_echo_decodes_token_id_prompt() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": [104, 101, 108, 108, 111],
+                        "echo": true,
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["choices"][0]["text"], "hellohi");
+    assert_eq!(json["usage"]["prompt_tokens"], 5);
+    assert_eq!(json["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_completions_include_logprobs() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -3463,6 +3499,51 @@ async fn completions_echo_stream_emits_separate_prompt_chunk() {
     .expect("usage chunk json");
     assert_eq!(usage_chunk["usage"]["prompt_tokens"], 5);
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_echo_stream_decodes_token_id_prompt() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": [104, 101, 108, 108, 111],
+                        "echo": true,
+                        "stream": true,
+                        "stream_options": {"include_usage": true}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+
+    let hello_index = payloads
+        .iter()
+        .position(|payload| payload.contains("\"text\":\"hello\""))
+        .expect("prompt echo chunk");
+    let h_index = payloads
+        .iter()
+        .position(|payload| payload.contains("\"text\":\"h\""))
+        .expect("first generation chunk");
+
+    assert!(hello_index < h_index, "{text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,7 +1,9 @@
-use vllm_text::{SamplingParams, TextDecodeOptions, TextRequest};
+use thiserror_ext::AsReport as _;
+use vllm_text::tokenizer::Tokenizer;
+use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 
 use super::types::CompletionRequest;
-use crate::error::ApiError;
+use crate::error::{ApiError, server_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
@@ -39,6 +41,7 @@ pub(crate) fn prepare_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
+    tokenizer: &dyn Tokenizer,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
 
@@ -70,7 +73,15 @@ pub(crate) fn prepare_completion_request(
         && (request.stream_options.as_ref())
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
-    let echo = request.echo.then(|| request.prompt.as_text().cloned()).flatten();
+    let echo = if request.echo {
+        Some(echo_prompt(
+            &request.prompt,
+            tokenizer,
+            request.skip_special_tokens,
+        )?)
+    } else {
+        None
+    };
 
     let structured_outputs =
         convert_from_response_format_value(&request.response_format, &request.structured_outputs)?;
@@ -131,11 +142,30 @@ pub(crate) fn prepare_completion_request(
     })
 }
 
+fn echo_prompt(
+    prompt: &Prompt,
+    tokenizer: &dyn Tokenizer,
+    skip_special_tokens: bool,
+) -> Result<String, ApiError> {
+    match prompt {
+        Prompt::Text(text) => Ok(text.clone()),
+        Prompt::TokenIds(token_ids) => {
+            tokenizer.decode(token_ids, skip_special_tokens).map_err(|error| {
+                server_error!(
+                    "failed to decode token-ID prompt for echo: {}",
+                    error.to_report_string()
+                )
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::http::HeaderMap;
     use serde_json::json;
     use vllm_text::Prompt;
+    use vllm_text::tokenizer::{Result as TokenizerResult, Tokenizer};
 
     use super::prepare_completion_request;
     use crate::lora::LoraModelResolution;
@@ -159,6 +189,26 @@ mod tests {
             "prompt": "hello",
             "stream": true
         })
+    }
+
+    #[derive(Debug)]
+    struct ByteTokenizer;
+
+    impl Tokenizer for ByteTokenizer {
+        fn encode(&self, text: &str, _add_special_tokens: bool) -> TokenizerResult<Vec<u32>> {
+            Ok(text.bytes().map(u32::from).collect())
+        }
+
+        fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> TokenizerResult<String> {
+            Ok(
+                String::from_utf8_lossy(&token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>())
+                    .into_owned(),
+            )
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            None
+        }
     }
 
     #[test]
@@ -213,6 +263,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &ByteTokenizer,
         )
         .expect("prepare");
 
@@ -258,6 +309,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &ByteTokenizer,
         )
         .expect("prepare");
 
@@ -280,6 +332,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &ByteTokenizer,
         )
         .expect("prepare");
 
@@ -291,23 +344,24 @@ mod tests {
     }
 
     #[test]
-    fn prepare_completion_request_rejects_token_id_prompt_echo() {
+    fn prepare_completion_request_accepts_token_id_prompt_echo() {
         let request: CompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "prompt": [11, 22, 33],
+            "prompt": [104, 101, 108, 108, 111],
             "stream": true,
             "echo": true
         }))
         .expect("parse request");
 
-        assert!(
-            prepare_completion_request(
-                request,
-                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-                ResolvedRequestContext::default(),
-            )
-            .is_err()
-        );
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &ByteTokenizer,
+        )
+        .expect("prepare");
+
+        assert_eq!(prepared.echo, Some("hello".to_string()));
     }
 
     #[test]
@@ -325,6 +379,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &ByteTokenizer,
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.sampling_params.logprobs, Some(1));
@@ -349,6 +404,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             request_context(&headers, None),
+            &ByteTokenizer,
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.data_parallel_rank, Some(3));
@@ -367,6 +423,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &ByteTokenizer,
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.data_parallel_rank, None);
