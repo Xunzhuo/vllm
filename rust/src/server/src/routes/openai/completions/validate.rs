@@ -24,7 +24,7 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
-    if request.max_tokens == Some(0) {
+    if request.max_tokens == Some(0) && !request.echo {
         bail_invalid_request!(param = "max_tokens", "max_tokens must be greater than 0.");
     }
 
