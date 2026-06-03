@@ -1,5 +1,3 @@
-use vllm_text::Prompt;
-
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 
@@ -28,13 +26,6 @@ pub(super) fn validate_request_compat(
 
     if request.max_tokens == Some(0) {
         bail_invalid_request!(param = "max_tokens", "max_tokens must be greater than 0.");
-    }
-
-    if request.echo && matches!(request.prompt, Prompt::TokenIds(_)) {
-        bail_invalid_request!(
-            param = "echo",
-            "echo is not supported with token-ID prompts."
-        );
     }
 
     if request.suffix.is_some() {
