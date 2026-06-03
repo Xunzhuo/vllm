@@ -132,6 +132,8 @@ pub(crate) fn prepare_completion_request(
         intermediate: request.stream,
         priority: request.priority.unwrap_or(0),
         cache_salt: request.cache_salt,
+        truncate_prompt_tokens: request.truncate_prompt_tokens,
+        truncation_side: request.truncation_side,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
         lora_request: lora_resolution.lora_request.clone(),
@@ -172,8 +174,8 @@ fn echo_prompt(
 mod tests {
     use axum::http::HeaderMap;
     use serde_json::json;
-    use vllm_text::Prompt;
     use vllm_text::tokenizer::{Result as TokenizerResult, Tokenizer};
+    use vllm_text::{Prompt, TruncationSide};
 
     use super::prepare_completion_request;
     use crate::lora::LoraModelResolution;
@@ -263,7 +265,9 @@ mod tests {
             "presence_penalty": 0.3,
             "repetition_penalty": 1.1,
             "ignore_eos": true,
-            "skip_special_tokens": false
+            "skip_special_tokens": false,
+            "truncate_prompt_tokens": 4,
+            "truncation_side": "right"
         }))
         .expect("parse request");
 
@@ -300,6 +304,11 @@ mod tests {
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
         assert!(!prepared.text_request.decode_options.skip_special_tokens);
+        assert_eq!(prepared.text_request.truncate_prompt_tokens, Some(4));
+        assert_eq!(
+            prepared.text_request.truncation_side,
+            Some(TruncationSide::Right)
+        );
     }
 
     #[test]
@@ -340,6 +349,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &ByteTokenizer,
         )
         .expect("prepare");
 

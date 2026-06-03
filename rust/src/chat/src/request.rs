@@ -422,6 +422,10 @@ pub struct ChatRequest {
     pub documents: Option<Vec<Value>>,
     /// Salt for prefix cache isolation in multi-user environments.
     pub cache_salt: Option<String>,
+    /// Optional prompt-token truncation limit, passed through to `vllm-text`.
+    pub truncate_prompt_tokens: Option<i64>,
+    /// Which side to truncate from when `truncate_prompt_tokens` is active.
+    pub truncation_side: Option<vllm_text::TruncationSide>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
     pub add_special_tokens: bool,
     /// Override data parallel rank.
@@ -447,6 +451,8 @@ impl ChatRequest {
             priority: 0,
             documents: None,
             cache_salt: None,
+            truncate_prompt_tokens: None,
+            truncation_side: None,
             add_special_tokens: false,
             data_parallel_rank: None,
             lora_request: None,

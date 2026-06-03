@@ -141,6 +141,8 @@ pub(crate) fn prepare_chat_request(
         priority: request.priority.unwrap_or(0),
         documents: request.documents,
         cache_salt: request.cache_salt,
+        truncate_prompt_tokens: request.truncate_prompt_tokens,
+        truncation_side: request.truncation_side,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
         lora_request: lora_resolution.lora_request.clone(),
@@ -363,7 +365,7 @@ mod tests {
         ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
         SamplingParams as VllmSamplingParams,
     };
-    use vllm_text::output::TextDecodeOptions;
+    use vllm_text::{TruncationSide, output::TextDecodeOptions};
 
     use super::prepare_chat_request;
     use crate::lora::LoraModelResolution;
@@ -509,6 +511,28 @@ mod tests {
         );
         assert!(prepared.chat_request.tools.is_empty());
         assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Auto);
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_prompt_truncation_fields() {
+        let request = ChatCompletionRequest {
+            truncate_prompt_tokens: Some(4),
+            truncation_side: Some(TruncationSide::Right),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(prepared.chat_request.truncate_prompt_tokens, Some(4));
+        assert_eq!(
+            prepared.chat_request.truncation_side,
+            Some(TruncationSide::Right)
+        );
     }
 
     #[test]

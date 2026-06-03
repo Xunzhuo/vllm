@@ -187,6 +187,8 @@ impl ChatLlm {
             intermediate: request.intermediate,
             priority: request.priority,
             cache_salt: request.cache_salt,
+            truncate_prompt_tokens: request.truncate_prompt_tokens,
+            truncation_side: request.truncation_side,
             add_special_tokens: request.add_special_tokens,
             data_parallel_rank: request.data_parallel_rank,
             lora_request: request.lora_request,

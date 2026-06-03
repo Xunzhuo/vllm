@@ -89,6 +89,8 @@ pub fn to_text_request(
         intermediate: stream,
         priority: req.priority,
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
+        truncate_prompt_tokens: None,
+        truncation_side: None,
         add_special_tokens: true,
         data_parallel_rank: None,
         lora_request: None,
