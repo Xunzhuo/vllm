@@ -22,6 +22,8 @@ pub struct PreparedRequest {
     /// Original text prompt that should be echoed back northbound when
     /// `echo=true`.
     pub echo: Option<String>,
+    /// Whether `echo=true` should return only the prompt for `max_tokens=0`.
+    pub echo_without_generation: bool,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
     /// Whether to format logprob tokens as `token_id:{id}`.
@@ -64,6 +66,7 @@ pub(crate) fn prepare_completion_request(
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let echo_without_generation = request.echo && request.max_tokens == Some(0);
     let echo = request.echo.then(|| request.prompt.as_text().cloned()).flatten();
 
     let structured_outputs =
@@ -78,7 +81,11 @@ pub(crate) fn prepare_completion_request(
             top_p: request.top_p,
             top_k: request.top_k,
             seed: request.seed,
-            max_tokens: request.max_tokens,
+            max_tokens: if echo_without_generation {
+                Some(1)
+            } else {
+                request.max_tokens
+            },
             min_tokens: request.min_tokens,
             logprobs,
             prompt_logprobs,
@@ -119,6 +126,7 @@ pub(crate) fn prepare_completion_request(
         include_usage,
         text_request,
         echo,
+        echo_without_generation,
         return_token_ids: request.return_token_ids.unwrap_or(false),
         return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
     })
@@ -252,6 +260,29 @@ mod tests {
 
         assert_eq!(prepared.echo, Some("hello".to_string()));
         assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
+    }
+
+    #[test]
+    fn prepare_completion_request_maps_echo_without_generation() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "echo": true,
+            "max_tokens": 0
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        assert_eq!(prepared.echo, Some("hello".to_string()));
+        assert!(prepared.echo_without_generation);
+        assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(1));
     }
 
     #[test]

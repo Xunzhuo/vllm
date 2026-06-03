@@ -20,7 +20,7 @@ use vllm_text::{DecodedTextEvent, FinishReason, TextOutputStream, TextOutputStre
 
 use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_maps,
-    text_len,
+    decoded_prompt_logprobs_to_openai, text_len,
 };
 use super::utils::types::Usage;
 use crate::error::{ApiError, bail_server_error, server_error};
@@ -86,6 +86,7 @@ pub async fn completions(
             log_request,
             prepared.include_usage,
             prepared.echo,
+            prepared.echo_without_generation,
             logprobs,
             prepared.return_token_ids,
             prepared.return_tokens_as_token_ids,
@@ -100,6 +101,7 @@ pub async fn completions(
             prepared.response_model,
             created,
             prepared.echo,
+            prepared.echo_without_generation,
             logprobs,
             include_prompt_logprobs,
             prepared.return_token_ids,
@@ -134,6 +136,7 @@ async fn collect_completion(
     response_model: String,
     created: u64,
     echo: Option<String>,
+    echo_without_generation: bool,
     requested_logprobs: Option<u32>,
     include_prompt_logprobs: bool,
     return_token_ids: bool,
@@ -159,7 +162,18 @@ async fn collect_completion(
     } else {
         None
     };
-    let logprobs = if requested_logprobs.is_some() {
+    let logprobs = if requested_logprobs.is_some() && echo_without_generation {
+        let prompt_logprobs = collected.prompt_logprobs.as_ref().ok_or_else(|| {
+            server_error!(
+                "echoed completion logprobs require prompt logprobs but generation returned none"
+            )
+        })?;
+        Some(decoded_prompt_logprobs_to_openai(
+            prompt_logprobs,
+            0,
+            return_tokens_as_token_ids,
+        )?)
+    } else if requested_logprobs.is_some() {
         Some(collected_logprobs_to_openai(
             &collected,
             echo.is_some(),
@@ -171,10 +185,17 @@ async fn collect_completion(
     };
     let prompt_logprobs =
         prompt_logprobs.map(|lp| decoded_prompt_logprobs_to_maps(lp, return_tokens_as_token_ids));
-    let text = match &echo {
-        None => collected.text,
-        Some(prompt) => format!("{prompt}{}", collected.text),
+    let text = match (&echo, echo_without_generation) {
+        (None, _) => collected.text,
+        (Some(prompt), true) => prompt.clone(),
+        (Some(prompt), false) => format!("{prompt}{}", collected.text),
     };
+    let token_ids = if echo_without_generation {
+        Vec::new()
+    } else {
+        collected.token_ids.clone()
+    };
+    let completion_token_count = token_ids.len() as u32;
 
     Ok(CompletionResponse {
         id: request_id,
@@ -188,12 +209,12 @@ async fn collect_completion(
             finish_reason: Some(completion_finish_reason_to_openai(finish_reason)?.into()),
             stop_reason,
             prompt_logprobs,
-            token_ids: return_token_ids.then(|| collected.token_ids.clone()),
+            token_ids: return_token_ids.then_some(token_ids),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
         }],
         usage: Some(Usage::from_counts(
             collected.prompt_token_ids.len() as u32,
-            collected.token_ids.len() as u32,
+            completion_token_count,
         )),
         system_fingerprint: None,
         kv_transfer_params: collected.kv_transfer_params,
@@ -210,6 +231,7 @@ async fn completion_chunk_stream(
     log_request: bool,
     include_usage: bool,
     echo: Option<String>,
+    echo_without_generation: bool,
     requested_logprobs: Option<u32>,
     return_token_ids: bool,
     return_tokens_as_token_ids: bool,
@@ -253,6 +275,38 @@ async fn completion_chunk_stream(
                 logprobs,
                 finished,
             }) => {
+                if echo_without_generation {
+                    if let Some(finished) = finished {
+                        if log_request {
+                            info!(
+                                stream = true,
+                                model = %response_model,
+                                prompt_tokens = finished.prompt_token_count,
+                                output_tokens = 0,
+                                finish_reason = finished.finish_reason.as_str(),
+                                "completion finished"
+                            );
+                        }
+                        y.yield_ok(CompletionSseChunk::Chunk(final_chunk(
+                            &request_id,
+                            &response_model,
+                            created,
+                            finished.finish_reason,
+                        )?))
+                        .await;
+
+                        if include_usage {
+                            y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
+                                &request_id,
+                                &response_model,
+                                created,
+                                Usage::from_counts(finished.prompt_token_count as u32, 0),
+                            )))
+                            .await;
+                        }
+                    }
+                    continue;
+                }
                 let delta_text_len = text_len(&delta);
                 let logprobs = if requested_logprobs.is_some() {
                     let decoded_logprobs = logprobs.as_ref().ok_or_else(|| {
@@ -529,6 +583,7 @@ mod tests {
             false,
             false,
             None,
+            false,
             Some(1),
             false,
             false,

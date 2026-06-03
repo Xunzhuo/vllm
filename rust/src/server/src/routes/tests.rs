@@ -2356,6 +2356,43 @@ async fn non_stream_completions_echo_prepends_prompt_text() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn non_stream_completions_echo_max_tokens_zero_returns_only_prompt() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "echo": true,
+                        "max_tokens": 0,
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["choices"][0]["text"], "hello");
+    assert_eq!(json["usage"]["prompt_tokens"], 5);
+    assert_eq!(json["usage"]["completion_tokens"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_completions_include_logprobs() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -3357,6 +3394,62 @@ async fn completions_echo_stream_emits_separate_prompt_chunk() {
     .expect("usage chunk json");
     assert_eq!(usage_chunk["usage"]["prompt_tokens"], 5);
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_echo_stream_max_tokens_zero_returns_only_prompt() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "echo": true,
+                        "max_tokens": 0,
+                        "stream": true,
+                        "stream_options": {"include_usage": true}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+
+    assert!(
+        payloads.iter().any(|payload| payload.contains("\"text\":\"hello\"")),
+        "{text}"
+    );
+    assert!(!text.contains("\"text\":\"h\""), "{text}");
+    assert!(!text.contains("\"text\":\"i\""), "{text}");
+    assert!(
+        payloads.iter().any(|payload| payload.contains("\"finish_reason\":\"stop\"")),
+        "{text}"
+    );
+
+    let usage_chunk: serde_json::Value = serde_json::from_str(
+        payloads
+            .iter()
+            .find(|payload| payload.contains("\"usage\":"))
+            .expect("usage chunk"),
+    )
+    .expect("usage chunk json");
+    assert_eq!(usage_chunk["usage"]["prompt_tokens"], 5);
+    assert_eq!(usage_chunk["usage"]["completion_tokens"], 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
