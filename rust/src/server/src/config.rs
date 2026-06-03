@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
+use axum::http::{HeaderName, HeaderValue, Method};
 use serde::Serialize;
 use serde_json::Value;
 use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
@@ -30,6 +31,98 @@ pub enum CoordinatorMode {
     MaybeInProc,
     /// Connect to an external coordinator owned by another process.
     External { address: String },
+}
+
+/// HTTP CORS behavior for the OpenAI-compatible server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CorsConfig {
+    /// Whether `Access-Control-Allow-Credentials` should be set to `true`.
+    pub allow_credentials: bool,
+    /// Allowed origins. `["*"]` means any origin.
+    pub allowed_origins: Vec<String>,
+    /// Allowed HTTP methods. `["*"]` means any method.
+    pub allowed_methods: Vec<String>,
+    /// Allowed request headers. `["*"]` means any header.
+    pub allowed_headers: Vec<String>,
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            allow_credentials: false,
+            allowed_origins: vec!["*".to_string()],
+            allowed_methods: vec!["*".to_string()],
+            allowed_headers: vec!["*".to_string()],
+        }
+    }
+}
+
+impl CorsConfig {
+    /// Validate the configured CORS values without constructing middleware.
+    pub fn validate(&self) -> Result<()> {
+        self.allowed_origin_values()?;
+        self.allowed_method_values()?;
+        self.allowed_header_values()?;
+        Ok(())
+    }
+
+    pub(crate) fn allows_any_origin(&self) -> bool {
+        is_wildcard_list(&self.allowed_origins)
+    }
+
+    pub(crate) fn allows_any_method(&self) -> bool {
+        is_wildcard_list(&self.allowed_methods)
+    }
+
+    pub(crate) fn allows_any_header(&self) -> bool {
+        is_wildcard_list(&self.allowed_headers)
+    }
+
+    pub(crate) fn allowed_origin_values(&self) -> Result<Vec<HeaderValue>> {
+        if self.allows_any_origin() {
+            return Ok(Vec::new());
+        }
+
+        self.allowed_origins
+            .iter()
+            .map(|origin| {
+                HeaderValue::from_str(origin)
+                    .map_err(|error| anyhow::anyhow!("invalid CORS origin `{origin}`: {error}"))
+            })
+            .collect()
+    }
+
+    pub(crate) fn allowed_method_values(&self) -> Result<Vec<Method>> {
+        if self.allows_any_method() {
+            return Ok(Vec::new());
+        }
+
+        self.allowed_methods
+            .iter()
+            .map(|method| {
+                Method::from_bytes(method.as_bytes())
+                    .map_err(|error| anyhow::anyhow!("invalid CORS method `{method}`: {error}"))
+            })
+            .collect()
+    }
+
+    pub(crate) fn allowed_header_values(&self) -> Result<Vec<HeaderName>> {
+        if self.allows_any_header() {
+            return Ok(Vec::new());
+        }
+
+        self.allowed_headers
+            .iter()
+            .map(|header| {
+                HeaderName::from_bytes(header.as_bytes())
+                    .map_err(|error| anyhow::anyhow!("invalid CORS header `{header}`: {error}"))
+            })
+            .collect()
+    }
+}
+
+fn is_wildcard_list(values: &[String]) -> bool {
+    values.len() == 1 && values.first().is_some_and(|value| value == "*")
 }
 
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
@@ -67,6 +160,8 @@ pub struct Config {
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage).
     pub disable_log_stats: bool,
+    /// HTTP CORS behavior.
+    pub cors: CorsConfig,
     /// TCP port for the gRPC Generate service. When `None`, no gRPC server is
     /// started.
     pub grpc_port: Option<u16>,
@@ -79,6 +174,7 @@ impl Config {
     /// startup.
     pub fn validate(&self) -> Result<()> {
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
+        self.cors.validate()?;
 
         Ok(())
     }

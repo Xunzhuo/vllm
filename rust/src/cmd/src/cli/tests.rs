@@ -1,6 +1,6 @@
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
-use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
+use vllm_server::{Config, CorsConfig, HttpListenerMode, ParserSelection, RendererSelection};
 
 use super::{Cli, Command};
 
@@ -45,6 +45,10 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_log_requests: false,
                         enable_request_id_headers: false,
                         disable_log_stats: false,
+                        allow_credentials: false,
+                        allowed_origins: None,
+                        allowed_methods: None,
+                        allowed_headers: None,
                         served_model_name: [],
                     },
                     managed_engine: ManagedEngineArgs {
@@ -189,11 +193,11 @@ fn serve_args_reject_unknown_renderer_value() {
 
 #[test]
 fn serve_args_reject_unsupported_flag_arg() {
-    let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--allow-credentials"])
+    let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--api-key", "secret"])
         .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'true' for '--allow-credentials [<ALLOW_CREDENTIALS>]': argument is not implemented in Rust frontend yet
+        error: invalid value 'secret' for '--api-key <API_KEY>': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
@@ -272,6 +276,10 @@ fn frontend_args_accept_json() {
                         enable_log_requests: false,
                         enable_request_id_headers: false,
                         disable_log_stats: false,
+                        allow_credentials: false,
+                        allowed_origins: None,
+                        allowed_methods: None,
+                        allowed_headers: None,
                         served_model_name: [],
                     },
                 },
@@ -416,19 +424,21 @@ fn frontend_args_json_rejects_unsupported_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_key":["secret"]}"#,
     ])
     .unwrap_err();
 
+    let error = error.to_string().replace("': \n", "':\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true}' for '--args-json <JSON>': 
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","api_key":["secret"]}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
-        - allow_credentials
+        - api_key
 
         Remove these arguments to continue.
 
         For more information, try '--help'.
-    "#]].assert_eq(&error.to_string());
+    "#]]
+    .assert_eq(&error);
 }
 
 #[test]
@@ -443,20 +453,53 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"api_key":"secret"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_key":"secret","root_path":"/proxy"}"#,
     ])
     .unwrap_err();
 
+    let error = error.to_string().replace("': \n", "':\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"api_key":"secret"}' for '--args-json <JSON>': 
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","api_key":"secret","root_path":"/proxy"}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
-        - allow_credentials
         - api_key
+        - root_path
 
         Remove these arguments to continue.
 
         For more information, try '--help'.
-    "#]].assert_eq(&error.to_string());
+    "#]]
+    .assert_eq(&error);
+}
+
+#[test]
+fn frontend_args_json_accepts_cors_fields() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"allowed_origins":["https://example.com"],"allowed_methods":["GET","POST"],"allowed_headers":["authorization","content-type"]}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+
+    assert_eq!(
+        args.runtime.cors_config(),
+        CorsConfig {
+            allow_credentials: true,
+            allowed_origins: vec!["https://example.com".to_string()],
+            allowed_methods: vec!["GET".to_string(), "POST".to_string()],
+            allowed_headers: vec!["authorization".to_string(), "content-type".to_string()],
+        }
+    );
 }
 
 #[test]
@@ -671,6 +714,10 @@ fn serve_args_accept_handshake_aliases() {
                         enable_log_requests: false,
                         enable_request_id_headers: false,
                         disable_log_stats: false,
+                        allow_credentials: false,
+                        allowed_origins: None,
+                        allowed_methods: None,
+                        allowed_headers: None,
                         served_model_name: [],
                     },
                     managed_engine: ManagedEngineArgs {
@@ -789,6 +836,18 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             enable_log_requests: false,
             enable_request_id_headers: false,
             disable_log_stats: false,
+            cors: CorsConfig {
+                allow_credentials: false,
+                allowed_origins: [
+                    "*",
+                ],
+                allowed_methods: [
+                    "*",
+                ],
+                allowed_headers: [
+                    "*",
+                ],
+            },
             grpc_port: None,
             shutdown_timeout: 0ns,
         }
@@ -852,6 +911,18 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             enable_log_requests: false,
             enable_request_id_headers: false,
             disable_log_stats: false,
+            cors: CorsConfig {
+                allow_credentials: false,
+                allowed_origins: [
+                    "*",
+                ],
+                allowed_methods: [
+                    "*",
+                ],
+                allowed_headers: [
+                    "*",
+                ],
+            },
             grpc_port: None,
             shutdown_timeout: 0ns,
         }
@@ -930,6 +1001,18 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             enable_log_requests: false,
             enable_request_id_headers: false,
             disable_log_stats: false,
+            cors: CorsConfig {
+                allow_credentials: false,
+                allowed_origins: [
+                    "*",
+                ],
+                allowed_methods: [
+                    "*",
+                ],
+                allowed_headers: [
+                    "*",
+                ],
+            },
             grpc_port: None,
             shutdown_timeout: 0ns,
         }

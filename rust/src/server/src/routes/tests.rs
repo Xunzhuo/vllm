@@ -12,7 +12,7 @@ use std::time::Duration;
 use std::{fmt, fs};
 
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderValue, Request, StatusCode, header};
 use bytes::Bytes;
 use futures::StreamExt as _;
 use rmpv::Value;
@@ -44,6 +44,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora};
+use crate::config::CorsConfig;
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::convert::prepare_chat_request;
 use crate::state::AppState;
@@ -957,6 +958,82 @@ async fn server_load(app: &axum::Router) -> u64 {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
     value["server_load"].as_u64().expect("server_load")
+}
+
+#[tokio::test]
+async fn cors_preflight_uses_default_wildcard_config() {
+    let mut app = test_app().await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/completions")
+                .header(header::ORIGIN, "https://example.com")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&HeaderValue::from_static("*"))
+    );
+    assert_eq!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_METHODS),
+        Some(&HeaderValue::from_static("*"))
+    );
+    assert!(response.headers().get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_preflight_mirrors_wildcards_when_credentials_are_enabled() {
+    let (chat, _engine_task) = test_chat_with_engine_handle().await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_cors(CorsConfig {
+            allow_credentials: true,
+            ..CorsConfig::default()
+        }),
+    ));
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/completions")
+                .header(header::ORIGIN, "https://example.com")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "authorization,content-type",
+                )
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&HeaderValue::from_static("https://example.com"))
+    );
+    assert_eq!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+        Some(&HeaderValue::from_static("true"))
+    );
+    assert_eq!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_METHODS),
+        Some(&HeaderValue::from_static("POST"))
+    );
+    assert_eq!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_HEADERS),
+        Some(&HeaderValue::from_static("authorization,content-type"))
+    );
 }
 
 async fn health_status(app: &axum::Router) -> (StatusCode, Bytes) {

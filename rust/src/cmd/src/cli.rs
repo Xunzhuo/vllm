@@ -22,8 +22,8 @@ use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
-    ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode, ParserSelection,
-    RendererSelection,
+    ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig, HttpListenerMode,
+    ParserSelection, RendererSelection,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -180,6 +180,26 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub disable_log_stats: bool,
 
+    /// Allow credentials in CORS responses.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub allow_credentials: bool,
+
+    /// Allowed CORS origins as a JSON list.
+    #[arg(long, value_parser = parse_json::<Vec<String>>, value_name = "JSON")]
+    #[serde(default)]
+    pub allowed_origins: Option<Vec<String>>,
+
+    /// Allowed CORS methods as a JSON list.
+    #[arg(long, value_parser = parse_json::<Vec<String>>, value_name = "JSON")]
+    #[serde(default)]
+    pub allowed_methods: Option<Vec<String>>,
+
+    /// Allowed CORS headers as a JSON list.
+    #[arg(long, value_parser = parse_json::<Vec<String>>, value_name = "JSON")]
+    #[serde(default)]
+    pub allowed_headers: Option<Vec<String>>,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -225,6 +245,7 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
+        let cors = self.cors_config();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -249,6 +270,7 @@ impl SharedRuntimeArgs {
             enable_log_requests: self.enable_log_requests,
             enable_request_id_headers: self.enable_request_id_headers,
             disable_log_stats: self.disable_log_stats,
+            cors,
             grpc_port: self.grpc_port,
             shutdown_timeout,
         }
@@ -267,6 +289,7 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
+        let cors = self.cors_config();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -290,14 +313,28 @@ impl SharedRuntimeArgs {
             enable_log_requests: self.enable_log_requests,
             enable_request_id_headers: self.enable_request_id_headers,
             disable_log_stats: self.disable_log_stats,
+            cors,
             grpc_port: self.grpc_port,
             shutdown_timeout,
+        }
+    }
+
+    fn cors_config(&self) -> CorsConfig {
+        CorsConfig {
+            allow_credentials: self.allow_credentials,
+            allowed_origins: self.allowed_origins.clone().unwrap_or_else(default_cors_wildcard),
+            allowed_methods: self.allowed_methods.clone().unwrap_or_else(default_cors_wildcard),
+            allowed_headers: self.allowed_headers.clone().unwrap_or_else(default_cors_wildcard),
         }
     }
 }
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn default_cors_wildcard() -> Vec<String> {
+    vec!["*".to_string()]
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
