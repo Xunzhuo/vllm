@@ -56,6 +56,8 @@ pub fn prepare_generate_request(
         intermediate: false,
         priority: request.priority,
         cache_salt: request.cache_salt,
+        truncate_prompt_tokens: None,
+        truncation_side: None,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
         lora_request: lora_resolution.lora_request.clone(),

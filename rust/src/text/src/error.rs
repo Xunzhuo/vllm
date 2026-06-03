@@ -9,6 +9,14 @@ pub enum Error {
     #[error("text request `{request_id}` must contain at least one prompt token ID")]
     EmptyPromptTokenIds { request_id: String },
     #[error(
+        "text request `{request_id}` has invalid truncate_prompt_tokens={truncate_prompt_tokens}; \
+         expected a positive value or -1"
+    )]
+    InvalidTruncatePromptTokens {
+        request_id: String,
+        truncate_prompt_tokens: i64,
+    },
+    #[error(
         "this model's maximum context length is {max_model_len} tokens, \
          but the prompt contains {prompt_len} input tokens"
     )]

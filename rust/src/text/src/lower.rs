@@ -6,7 +6,7 @@ use vllm_tokenizer::Tokenizer;
 
 use crate::backend::SamplingHints;
 use crate::error::{Error, Result};
-use crate::request::{SamplingParams, TextRequest};
+use crate::request::{SamplingParams, TextRequest, TruncationSide};
 
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
@@ -26,6 +26,7 @@ pub fn lower_text_request(
     sampling_hints: SamplingHints,
     tokenizer: &dyn Tokenizer,
 ) -> Result<PreparedTextRequest> {
+    let prompt_token_ids = truncate_prompt_token_ids(&request, prompt_token_ids, &sampling_hints)?;
     let prompt_len = prompt_token_ids.len() as u32;
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
@@ -51,6 +52,53 @@ pub fn lower_text_request(
         text_request: request,
         generate_request,
     })
+}
+
+fn truncate_prompt_token_ids(
+    request: &TextRequest,
+    mut prompt_token_ids: Vec<u32>,
+    sampling_hints: &SamplingHints,
+) -> Result<Vec<u32>> {
+    let Some(truncate_prompt_tokens) = request.truncate_prompt_tokens else {
+        return Ok(prompt_token_ids);
+    };
+
+    let max_length = match truncate_prompt_tokens {
+        -1 => sampling_hints.max_model_len.map_or(prompt_token_ids.len(), |len| {
+            let max_output_tokens = request
+                .sampling_params
+                .max_tokens
+                .or(sampling_hints.default_max_tokens)
+                .unwrap_or(0);
+            len.saturating_sub(max_output_tokens) as usize
+        }),
+        value if value > 0 => usize::try_from(value).unwrap_or(usize::MAX),
+        value => {
+            return Err(Error::InvalidTruncatePromptTokens {
+                request_id: request.request_id.clone(),
+                truncate_prompt_tokens: value,
+            });
+        }
+    };
+
+    if max_length >= prompt_token_ids.len() {
+        return Ok(prompt_token_ids);
+    }
+    if max_length == 0 {
+        prompt_token_ids.clear();
+        return Ok(prompt_token_ids);
+    }
+
+    match request.truncation_side.unwrap_or_default() {
+        TruncationSide::Left => {
+            let start = prompt_token_ids.len() - max_length;
+            Ok(prompt_token_ids.split_off(start))
+        }
+        TruncationSide::Right => {
+            prompt_token_ids.truncate(max_length);
+            Ok(prompt_token_ids)
+        }
+    }
 }
 
 /// Convert [`SamplingParams`] into [`EngineCoreSamplingParams`], enriching
@@ -240,7 +288,7 @@ mod tests {
     use super::*;
     use crate::backend::hf::HfTextBackend;
     use crate::backend::{SamplingHints, TextBackend as _};
-    use crate::request::{Prompt, TextRequest};
+    use crate::request::{Prompt, TextRequest, TruncationSide};
 
     /// Stub tokenizer that returns empty token IDs — sufficient for tests that
     /// don't exercise bad-words tokenization.
@@ -385,6 +433,55 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn lower_text_request_truncates_prompt_tokens_from_left_by_default() {
+        let mut request = sample_request();
+        request.truncate_prompt_tokens = Some(3);
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3, 4, 5],
+            sample_sampling_hints(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.prompt_token_ids, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn lower_text_request_truncates_prompt_tokens_from_right() {
+        let mut request = sample_request();
+        request.truncate_prompt_tokens = Some(3);
+        request.truncation_side = Some(TruncationSide::Right);
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3, 4, 5],
+            sample_sampling_hints(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.prompt_token_ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn lower_text_request_resolves_negative_truncation_to_input_budget() {
+        let mut request = sample_request();
+        request.truncate_prompt_tokens = Some(-1);
+        request.sampling_params.max_tokens = Some(2);
+
+        let mut hints = sample_sampling_hints();
+        hints.max_model_len = Some(6);
+
+        let prepared =
+            lower_text_request(request, vec![1, 2, 3, 4, 5], hints, &stub_tokenizer()).unwrap();
+
+        assert_eq!(prepared.generate_request.prompt_token_ids, vec![2, 3, 4, 5]);
+        assert_eq!(prepared.generate_request.sampling_params.max_tokens, 2);
     }
 
     #[tokio::test]

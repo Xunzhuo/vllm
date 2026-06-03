@@ -31,6 +31,17 @@ impl Default for Prompt {
     }
 }
 
+/// Which side of the prompt to truncate when a token limit is active.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TruncationSide {
+    /// Drop tokens from the left and keep the right-most tokens.
+    #[default]
+    Left,
+    /// Drop tokens from the right and keep the left-most tokens.
+    Right,
+}
+
 /// User-facing sampling parameters accepted by `vllm-text`.
 ///
 /// This intentionally keeps only the subset that the current Rust text layer
@@ -162,6 +173,11 @@ pub struct TextRequest {
     pub priority: i32,
     /// Salt for prefix cache isolation in multi-user environments.
     pub cache_salt: Option<String>,
+    /// Optional prompt-token truncation limit. `-1` means the model context
+    /// limit, matching Python vLLM's OpenAI frontend.
+    pub truncate_prompt_tokens: Option<i64>,
+    /// Which side to truncate from when `truncate_prompt_tokens` is active.
+    pub truncation_side: Option<TruncationSide>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
     pub add_special_tokens: bool,
     /// Override data parallel rank.
@@ -184,6 +200,8 @@ impl TextRequest {
             intermediate: true,
             priority: 0,
             cache_salt: None,
+            truncate_prompt_tokens: None,
+            truncation_side: None,
             add_special_tokens: false,
             data_parallel_rank: None,
             lora_request: None,
