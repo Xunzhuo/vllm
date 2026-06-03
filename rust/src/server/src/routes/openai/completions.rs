@@ -85,6 +85,7 @@ pub async fn completions(
             created,
             log_request,
             prepared.include_usage,
+            prepared.include_continuous_usage,
             prepared.echo,
             logprobs,
             prepared.return_token_ids,
@@ -209,6 +210,7 @@ async fn completion_chunk_stream(
     created: u64,
     log_request: bool,
     include_usage: bool,
+    include_continuous_usage: bool,
     echo: Option<String>,
     requested_logprobs: Option<u32>,
     return_token_ids: bool,
@@ -218,6 +220,8 @@ async fn completion_chunk_stream(
     pin_mut!(stream);
     let mut visible_text_len = 0_u32;
     let mut first_chunk = true;
+    let mut prompt_token_count = 0_u32;
+    let mut output_token_count = 0_u32;
 
     while let Some(next) = stream.next().await {
         match next {
@@ -225,6 +229,7 @@ async fn completion_chunk_stream(
                 prompt_token_ids, ..
             }) => {
                 debug!("completion stream started");
+                prompt_token_count = prompt_token_ids.len() as u32;
                 if let Some(prompt) = echo.as_ref() {
                     visible_text_len = text_len(prompt);
                     let mut chunk =
@@ -235,6 +240,9 @@ async fn completion_chunk_stream(
                         }
                         first_chunk = false;
                     }
+                    if include_continuous_usage {
+                        chunk.usage = Some(Usage::from_counts(prompt_token_count, 0));
+                    }
                     y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
                 } else if return_token_ids {
                     // Emit a chunk with prompt_token_ids in the first streaming response
@@ -244,6 +252,9 @@ async fn completion_chunk_stream(
                         choice.prompt_token_ids = Some(prompt_token_ids.to_vec());
                     }
                     first_chunk = false;
+                    if include_continuous_usage {
+                        chunk.usage = Some(Usage::from_counts(prompt_token_count, 0));
+                    }
                     y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
                 }
             }
@@ -253,6 +264,7 @@ async fn completion_chunk_stream(
                 logprobs,
                 finished,
             }) => {
+                let token_count = token_ids.len() as u32;
                 let delta_text_len = text_len(&delta);
                 let logprobs = if requested_logprobs.is_some() {
                     let decoded_logprobs = logprobs.as_ref().ok_or_else(|| {
@@ -271,6 +283,10 @@ async fn completion_chunk_stream(
                 let mut chunk = delta_chunk(&request_id, &response_model, created, delta, logprobs);
                 if return_token_ids && let Some(choice) = chunk.choices.first_mut() {
                     choice.token_ids = Some(token_ids);
+                }
+                output_token_count = output_token_count.saturating_add(token_count);
+                if include_continuous_usage {
+                    chunk.usage = Some(Usage::from_counts(prompt_token_count, output_token_count));
                 }
                 y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
                 visible_text_len = visible_text_len.saturating_add(delta_text_len);
@@ -526,6 +542,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            false,
             false,
             false,
             None,
